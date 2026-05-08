@@ -139,6 +139,151 @@ def btree_search(f, root_id, key):
     return None
 
 
+MIN_DEGREE = 10  # t=10, so max 2t-1=19 keys and 2t=20 children per node
+
+
+def split_child(f, parent, child_idx, child):
+    """
+    Split a full child node into left (child, trimmed in place) and right (new node).
+    Median key is promoted into parent. Never holds more than 3 nodes in memory at once.
+    After writing all 3 nodes, updates moved grandchildren's parent_id one at a time.
+    """
+    t = MIN_DEGREE
+    mid = t - 1  # median sits at index 9
+
+    root_id, next_block_id = read_header(f)
+
+    # new right node gets the upper half of child (keys[10..18], children[10..19])
+    right = Node(next_block_id, parent.block_id)
+    right.num_keys = t - 1
+    for i in range(t - 1):
+        right.keys[i] = child.keys[mid + 1 + i]
+        right.values[i] = child.values[mid + 1 + i]
+
+    moved_children = []
+    if not child.is_leaf():
+        for i in range(t):
+            right.children[i] = child.children[mid + 1 + i]
+            if right.children[i] != 0:
+                moved_children.append(right.children[i])
+
+    median_key = child.keys[mid]
+    median_val = child.values[mid]
+
+    # trim child to left half (keys[0..8], children[0..9])
+    child.num_keys = t - 1
+    for i in range(mid, MAX_KEYS):
+        child.keys[i] = 0
+        child.values[i] = 0
+    for i in range(t, MAX_CHILDREN):
+        child.children[i] = 0
+
+    # insert median into parent at child_idx, shifting everything right to make room
+    for i in range(parent.num_keys - 1, child_idx - 1, -1):
+        parent.keys[i + 1] = parent.keys[i]
+        parent.values[i + 1] = parent.values[i]
+    for i in range(parent.num_keys, child_idx, -1):
+        parent.children[i + 1] = parent.children[i]
+
+    parent.keys[child_idx] = median_key
+    parent.values[child_idx] = median_val
+    parent.children[child_idx + 1] = right.block_id
+    parent.num_keys += 1
+
+    # flush all 3 nodes and claim the new block in the header
+    write_header(f, root_id, next_block_id + 1)
+    write_node(f, parent)
+    write_node(f, child)
+    write_node(f, right)
+
+    # update moved grandchildren's parent pointer one at a time (1 node in memory each)
+    for gc_id in moved_children:
+        gc = read_node(f, gc_id)
+        gc.parent_id = right.block_id
+        write_node(f, gc)
+
+    return right
+
+
+def btree_insert(f, key, value):
+    """
+    Insert key/value into the B-tree using a top-down pre-split approach so we never
+    need to backtrack. At most 3 nodes are in memory at any point during a split.
+    """
+    root_id, next_block_id = read_header(f)
+
+    # empty tree: first insert creates the root
+    if root_id == 0:
+        root = Node(next_block_id, 0)
+        root.num_keys = 1
+        root.keys[0] = key
+        root.values[0] = value
+        write_node(f, root)
+        write_header(f, next_block_id, next_block_id + 1)
+        return
+
+    root = read_node(f, root_id)
+
+    # if root is full, grow the tree upward before descending
+    if root.num_keys == MAX_KEYS:
+        _, next_block_id = read_header(f)
+        new_root = Node(next_block_id, 0)
+        new_root.children[0] = root.block_id
+        root.parent_id = next_block_id
+        # claim the new root block and update header before split allocates another
+        write_header(f, next_block_id, next_block_id + 1)
+        # split_child uses 3 nodes: new_root (1), root/old root (2), new right sibling (3)
+        right = split_child(f, new_root, 0, root)
+        root_id = new_root.block_id
+        new_root = read_node(f, root_id)
+        pivot = new_root.keys[0]
+        left_id = new_root.children[0]
+        new_root = None  # free slot before descending
+        node = right if key > pivot else read_node(f, left_id)
+    else:
+        node = root
+
+    # iterative descent: pre-split any full child before stepping into it
+    while True:
+        # check if key already exists in this node and update in place
+        for i in range(node.num_keys):
+            if node.keys[i] == key:
+                node.values[i] = value
+                write_node(f, node)
+                return
+
+        if node.is_leaf():
+            # shift keys right and insert at correct sorted position
+            i = node.num_keys - 1
+            while i >= 0 and key < node.keys[i]:
+                node.keys[i + 1] = node.keys[i]
+                node.values[i + 1] = node.values[i]
+                i -= 1
+            node.keys[i + 1] = key
+            node.values[i + 1] = value
+            node.num_keys += 1
+            write_node(f, node)
+            return
+
+        # find the child slot to follow
+        ci = 0
+        while ci < node.num_keys and key > node.keys[ci]:
+            ci += 1
+
+        child = read_node(f, node.children[ci])  # 2nd node in memory
+
+        if child.num_keys == MAX_KEYS:
+            # pre-split: node (1) + child (2) + new right (3), all written inside split_child
+            right = split_child(f, node, ci, child)
+            pivot = node.keys[ci]
+            left_id = node.children[ci]
+            node = None  # free slot before picking next node
+            node = right if key > pivot else read_node(f, left_id)
+        else:
+            # no split needed, drop reference to parent and descend
+            node = child
+
+
 def cmd_create(args):
     if len(args) < 1:
         print("Usage: project3 create <filename>", file=sys.stderr)
@@ -150,6 +295,16 @@ def cmd_create(args):
     # write an empty header; root_id=0 means the tree is empty, next block to allocate is 1
     with open(filename, 'wb') as f:
         write_header(f, 0, 1)
+
+
+def cmd_insert(args):
+    if len(args) < 3:
+        print("Usage: project3 insert <filename> <key> <value>", file=sys.stderr)
+        sys.exit(1)
+    filename, key, value = args[0], int(args[1]), int(args[2])
+    f = open_index(filename)
+    btree_insert(f, key, value)
+    f.close()
 
 
 def cmd_search(args):
@@ -177,6 +332,8 @@ def main():
 
     if cmd == 'create':
         cmd_create(args)
+    elif cmd == 'insert':
+        cmd_insert(args)
     elif cmd == 'search':
         cmd_search(args)
     else:
