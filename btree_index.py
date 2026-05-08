@@ -38,6 +38,63 @@ def write_header(f, root_id, next_block_id):
     write_block(f, 0, bytes(data))
 
 
+MAX_KEYS = 19
+MAX_CHILDREN = 20
+
+
+class Node:
+    def __init__(self, block_id, parent_id=0):
+        self.block_id = block_id
+        self.parent_id = parent_id
+        self.num_keys = 0
+        self.keys = [0] * MAX_KEYS
+        self.values = [0] * MAX_KEYS
+        self.children = [0] * MAX_CHILDREN
+
+    @staticmethod
+    def from_block(data):
+        def rd(offset):
+            return int.from_bytes(data[offset:offset + 8], 'big')
+
+        node = Node(rd(0), rd(8))
+        node.num_keys = rd(16)
+        for i in range(MAX_KEYS):
+            node.keys[i] = rd(24 + i * 8)
+        for i in range(MAX_KEYS):
+            node.values[i] = rd(176 + i * 8)
+        for i in range(MAX_CHILDREN):
+            node.children[i] = rd(328 + i * 8)
+        return node
+
+    def to_block(self):
+        data = bytearray(BLOCK_SIZE)
+
+        def wr(offset, val):
+            data[offset:offset + 8] = val.to_bytes(8, 'big')
+
+        wr(0, self.block_id)
+        wr(8, self.parent_id)
+        wr(16, self.num_keys)
+        for i in range(MAX_KEYS):
+            wr(24 + i * 8, self.keys[i])
+        for i in range(MAX_KEYS):
+            wr(176 + i * 8, self.values[i])
+        for i in range(MAX_CHILDREN):
+            wr(328 + i * 8, self.children[i])
+        return bytes(data)
+
+    def is_leaf(self):
+        return self.children[0] == 0
+
+
+def read_node(f, block_id):
+    return Node.from_block(read_block(f, block_id))
+
+
+def write_node(f, node):
+    write_block(f, node.block_id, node.to_block())
+
+
 def open_index(filename):
     if not os.path.exists(filename):
         print(f"Error: file '{filename}' does not exist", file=sys.stderr)
