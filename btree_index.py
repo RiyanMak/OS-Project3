@@ -284,6 +284,45 @@ def btree_insert(f, key, value):
             node = child
 
 
+def btree_inorder_pairs(f, root_id):
+    if root_id == 0:
+        return
+    # Descend to leftmost leaf
+    block_id = root_id
+    while True:
+        node = read_node(f, block_id)
+        if node.is_leaf():
+            break
+        block_id = node.children[0]
+    # Iterative inorder using stored parent pointers — at most 2 nodes in memory at a time
+    while True:
+        node = read_node(f, block_id)
+        for i in range(node.num_keys):
+            yield node.keys[i], node.values[i]
+        child_id = block_id
+        parent_id = node.parent_id
+        while parent_id != 0:
+            parent = read_node(f, parent_id)
+            ci = 0
+            while ci <= parent.num_keys and parent.children[ci] != child_id:
+                ci += 1
+            if ci < parent.num_keys:
+                yield parent.keys[ci], parent.values[ci]
+                # Descend to leftmost leaf of the next child
+                block_id = parent.children[ci + 1]
+                while True:
+                    node = read_node(f, block_id)
+                    if node.is_leaf():
+                        break
+                    block_id = node.children[0]
+                break
+            else:
+                child_id = parent_id
+                parent_id = parent.parent_id
+        else:
+            return
+
+
 def cmd_create(args):
     if len(args) < 1:
         print("Usage: project3 create <filename>", file=sys.stderr)
@@ -322,6 +361,53 @@ def cmd_search(args):
         print(f"{key},{result}")
 
 
+def cmd_load(args):
+    if len(args) < 2:
+        print("Usage: project3 load <filename> <csv_file>", file=sys.stderr)
+        sys.exit(1)
+    filename, csv_file = args[0], args[1]
+    if not os.path.exists(csv_file):
+        print(f"Error: file '{csv_file}' does not exist", file=sys.stderr)
+        sys.exit(1)
+    f = open_index(filename)
+    with open(csv_file, 'r') as cf:
+        for line in cf:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(',')
+            btree_insert(f, int(parts[0].strip()), int(parts[1].strip()))
+    f.close()
+
+
+def cmd_print(args):
+    if len(args) < 1:
+        print("Usage: project3 print <filename>", file=sys.stderr)
+        sys.exit(1)
+    filename = args[0]
+    f = open_index(filename)
+    root_id, _ = read_header(f)
+    for key, value in btree_inorder_pairs(f, root_id):
+        print(f"{key},{value}")
+    f.close()
+
+
+def cmd_extract(args):
+    if len(args) < 2:
+        print("Usage: project3 extract <filename> <output_file>", file=sys.stderr)
+        sys.exit(1)
+    filename, out_file = args[0], args[1]
+    if os.path.exists(out_file):
+        print(f"Error: file '{out_file}' already exists", file=sys.stderr)
+        sys.exit(1)
+    f = open_index(filename)
+    root_id, _ = read_header(f)
+    with open(out_file, 'w') as of:
+        for key, value in btree_inorder_pairs(f, root_id):
+            of.write(f"{key},{value}\n")
+    f.close()
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: project3 <command> [args...]", file=sys.stderr)
@@ -336,6 +422,12 @@ def main():
         cmd_insert(args)
     elif cmd == 'search':
         cmd_search(args)
+    elif cmd == 'load':
+        cmd_load(args)
+    elif cmd == 'print':
+        cmd_print(args)
+    elif cmd == 'extract':
+        cmd_extract(args)
     else:
         print(f"Error: unknown command '{cmd}'", file=sys.stderr)
         sys.exit(1)
